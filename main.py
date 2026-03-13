@@ -1,8 +1,8 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     SMC PRO v4 — BACKTEST v2.0                              ║
+║     SMC PRO v4 — BACKTEST v3.0                              ║
 ║                                                              ║
-║  Changes from v1 (based on backtest data):                 ║
+║  Changes from v2 (based on backtest data):                 ║
 ║    - SHORT ONLY: LONGs killed (35% WR → net loser)         ║
 ║    - MIN_SCORE: 75 → 83  (75-82 band = 43% WR, useless)   ║
 ║    - BEAR STRUCTURE REQUIRED: BOS_BULL/MSS_BULL blocked    ║
@@ -14,7 +14,7 @@
 ║    - TIMEOUT: 48H → 72H (give trades room to develop)      ║
 ║                                                              ║
 ║  Target: WR>55%, PF>2.0, MaxDD<25%                        ║
-║  Output: backtest_smc_v2_results.xlsx                       ║
+║  Output: backtest_smc_v3_results.xlsx                       ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -34,31 +34,36 @@ logger = logging.getLogger('SMCBacktest')
 # ── SETTINGS (match SMC Pro v4 exactly) ─────────────────────────────────────
 
 LOOKBACK_DAYS        = 180      # 6 months of data
-TOP_N_PAIRS          = 600      # top 100 by volume (SMC is slower per pair, 3 TFs)
+TOP_N_PAIRS          = 100      # top 100 by volume (SMC is slower per pair, 3 TFs)
 MIN_VOLUME_24H       = 5_000_000
 
 # SMC constants
-MIN_SCORE            = 83      # RAISED: 75-82 = 43% WR in v1, pure noise
+MIN_SCORE            = 85      # RAISED: 83-85 = 46% WR in v2, still bad
 OB_TOLERANCE_PCT     = 0.008
 OB_IMPULSE_ATR_MULT  = 1.0
 STRUCTURE_LOOKBACK   = 20
 HH_LL_LOOKBACK       = 10
 HH_LL_BONUS          = 8
 
-# v2 filters
+# v2 filters (kept)
 SHORT_ONLY           = True    # LONGs = 35% WR in v1, net negative
-REQUIRE_BEAR_STRUCTURE = True  # BOS_BEAR or MSS_BEAR only — no bull structure
+REQUIRE_BEAR_STRUCTURE = True  # BOS_BEAR or MSS_BEAR only
+
+# v3 NEW filters
+REQUIRE_BOS_ONLY     = True    # BOS_BEAR only — MSS_BEAR = 0% WR in v2
+BLOCK_SWEEP          = True    # Sweep=YES = 40% WR vs 62.9% without — kill it
+REQUIRE_TRENDING     = True    # HH/LL required — ranging = 33% WR in v2
 
 # Trade management
-TP_RR                = [2.0, 3.5, 5.5]     # WIDENED: earn more per trade
-TP_PCT               = [0.50, 0.30, 0.20]  # same partial close %
-TIMEOUT_HOURS        = 72      # EXTENDED: 48→72H, give trades room
+TP_RR                = [2.0, 3.5, 5.5]     # unchanged from v2
+TP_PCT               = [0.50, 0.30, 0.20]  # unchanged
+TIMEOUT_HOURS        = 48      # back to 48H — 72H didn't help, TP3 hit 40% fine
 
 # Equity sim
 RISK_PER_TRADE       = 0.02
 MAX_CONCURRENT       = 5
 
-OUTPUT_FILE = '/mnt/user-data/outputs/backtest_smc_v2_results.xlsx'
+OUTPUT_FILE = '/mnt/user-data/outputs/backtest_smc_v3_results.xlsx'
 
 
 # ── INDICATORS (identical to live bot) ──────────────────────────────────────
@@ -478,7 +483,7 @@ def analyse_candle(df_4h, df_1h, df_15m, signal_bar_idx):
     if bias == 'LONG' and pd_label == 'PREMIUM':    return None
     if bias == 'SHORT' and pd_label == 'DISCOUNT':  return None
 
-    # ── HH/LL Bonus Check ──
+    # ── HH/LL check (used by v3 TRENDING gate) ──
     hh_ll_ok = check_4h_hh_ll(df_4h, bias, HH_LL_LOOKBACK)
 
     # ── GATE 3: 1H Structure ──
@@ -496,6 +501,16 @@ def analyse_candle(df_4h, df_1h, df_15m, signal_bar_idx):
     if REQUIRE_BEAR_STRUCTURE:
         if structure is None: return None
         if 'BULL' in structure['kind']: return None
+
+    # ── v3 GATE: BOS_BEAR ONLY (block MSS_BEAR) ──
+    # MSS_BEAR = 0% WR in v2 (n=3). BOS_BEAR = 59.6% WR.
+    if REQUIRE_BOS_ONLY:
+        if structure is None or structure['kind'] != 'BOS_BEAR': return None
+
+    # ── v3 GATE: REQUIRE TRENDING (HH/LL confirmed) ──
+    # Ranging = 33% WR in v2 (n=3). Trending = 57.4% WR.
+    if REQUIRE_TRENDING and not hh_ll_ok:
+        return None
 
     # ── GATE 4: Order Block (hard gate) ──
     obs = find_order_blocks(df1_slice, bias, lookback=60)
@@ -516,6 +531,11 @@ def analyse_candle(df_4h, df_1h, df_15m, signal_bar_idx):
             fvg_near = fvg; break
 
     sweep = recent_liquidity_sweep(df1_slice, bias, highs1, lows1, lookback=20)
+
+    # ── v3 GATE: BLOCK SWEEP setups ──
+    # Sweep=YES = 40% WR in v2 vs 62.9% without sweep. Kill them.
+    if BLOCK_SWEEP and sweep is not None:
+        return None
 
     # ── GATE 5: Score ──
     score, reasons = score_setup(
@@ -855,7 +875,7 @@ async def run_backtest():
     # ── Print Results ────────────────────────────────────────────────────────
     print(f"""
 ╔══════════════════════════════════════════════════════╗
-║      📊 SMC PRO v4 BACKTEST v2 — RESULTS            ║
+║      📊 SMC PRO v4 BACKTEST v3 — RESULTS            ║
 ╚══════════════════════════════════════════════════════╝
 
   Settings: Score≥{MIN_SCORE} | 1H trigger | {LOOKBACK_DAYS}d | Top {TOP_N_PAIRS} pairs
