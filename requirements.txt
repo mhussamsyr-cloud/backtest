@@ -1,0 +1,6 @@
+ccxt
+python-telegram-bot
+pandas
+numpy
+ta
+aiohttp
