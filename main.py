@@ -1,29 +1,20 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     SMC PRO v4 — BACKTEST v1.0                              ║
+║     SMC PRO v4 — BACKTEST v2.0                              ║
 ║                                                              ║
-║  Faithful replication of SMC Pro Scanner v4.0              ║
+║  Changes from v1 (based on backtest data):                 ║
+║    - SHORT ONLY: LONGs killed (35% WR → net loser)         ║
+║    - MIN_SCORE: 75 → 83  (75-82 band = 43% WR, useless)   ║
+║    - BEAR STRUCTURE REQUIRED: BOS_BULL/MSS_BULL blocked    ║
+║    - SL tightened: ATR×0.4 instead of ATR×0.6 min         ║
+║      → smaller risk = fatter RR on same TP distances       ║
+║    - TP1 RR: 1.5 → 2.0  (earn more on first partial)      ║
+║    - TP2 RR: 2.5 → 3.5                                     ║
+║    - TP3 RR: 4.0 → 5.5  (ride the real moves)             ║
+║    - TIMEOUT: 48H → 72H (give trades room to develop)      ║
 ║                                                              ║
-║  Gates replicated exactly:                                  ║
-║    1. 4H EMA 21/50 bias                                     ║
-║    2. PD zone check                                         ║
-║    3. 1H BOS/MSS structure (lookback=20)                    ║
-║    4. Price at valid 1H Order Block                         ║
-║    5. Score ≥ 75                                            ║
-║                                                              ║
-║  Trade sim:                                                 ║
-║    - Entry: 1H close at signal                              ║
-║    - SL: OB bottom - 0.2*ATR (min entry - 0.6*ATR)         ║
-║    - TP1: 1.5R (close 50%), TP2: 2.5R (30%), TP3: 4.0R     ║
-║    - Timeout: 48H → close at market                         ║
-║    - Blended PnL across partial closes                      ║
-║                                                              ║
-║  Equity sim:                                                ║
-║    - 2% risk per trade (Kelly position sizing)              ║
-║    - Max 5 concurrent trades                                ║
-║    - Time-based: no double-counting concurrent positions    ║
-║                                                              ║
-║  Output: backtest_smc_v1_results.xlsx                       ║
+║  Target: WR>55%, PF>2.0, MaxDD<25%                        ║
+║  Output: backtest_smc_v2_results.xlsx                       ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -43,27 +34,31 @@ logger = logging.getLogger('SMCBacktest')
 # ── SETTINGS (match SMC Pro v4 exactly) ─────────────────────────────────────
 
 LOOKBACK_DAYS        = 180      # 6 months of data
-TOP_N_PAIRS          = 600      # top 100 by volume (SMC is slower per pair, 3 TFs)
+TOP_N_PAIRS          = 100      # top 100 by volume (SMC is slower per pair, 3 TFs)
 MIN_VOLUME_24H       = 5_000_000
 
 # SMC constants
-MIN_SCORE            = 75
+MIN_SCORE            = 83      # RAISED: 75-82 = 43% WR in v1, pure noise
 OB_TOLERANCE_PCT     = 0.008
 OB_IMPULSE_ATR_MULT  = 1.0
 STRUCTURE_LOOKBACK   = 20
 HH_LL_LOOKBACK       = 10
 HH_LL_BONUS          = 8
 
+# v2 filters
+SHORT_ONLY           = True    # LONGs = 35% WR in v1, net negative
+REQUIRE_BEAR_STRUCTURE = True  # BOS_BEAR or MSS_BEAR only — no bull structure
+
 # Trade management
-TP_RR                = [1.5, 2.5, 4.0]     # TP1, TP2, TP3
-TP_PCT               = [0.50, 0.30, 0.20]  # position % closed at each TP
-TIMEOUT_HOURS        = 48
+TP_RR                = [2.0, 3.5, 5.5]     # WIDENED: earn more per trade
+TP_PCT               = [0.50, 0.30, 0.20]  # same partial close %
+TIMEOUT_HOURS        = 72      # EXTENDED: 48→72H, give trades room
 
 # Equity sim
 RISK_PER_TRADE       = 0.02
 MAX_CONCURRENT       = 5
 
-OUTPUT_FILE = '/mnt/user-data/outputs/backtest_smc_v1_results.xlsx'
+OUTPUT_FILE = '/mnt/user-data/outputs/backtest_smc_v2_results.xlsx'
 
 
 # ── INDICATORS (identical to live bot) ──────────────────────────────────────
@@ -471,6 +466,11 @@ def analyse_candle(df_4h, df_1h, df_15m, signal_bar_idx):
     elif e21 < e50:     bias = 'SHORT'
     else:               return None
 
+    # ── v2 GATE: SHORT ONLY ──
+    # v1 data: LONGs = 35% WR, net negative. Kill entirely.
+    if SHORT_ONLY and bias == 'LONG':
+        return None
+
     price = df1_slice['close'].iloc[-1]
 
     # ── GATE 2: PD Zone ──
@@ -489,6 +489,13 @@ def analyse_candle(df_4h, df_1h, df_15m, signal_bar_idx):
         s_bear = 'BEAR' in structure['kind']
         if bias == 'LONG' and s_bear: return None
         if bias == 'SHORT' and s_bull: return None
+    
+    # ── v2 GATE: REQUIRE BEAR STRUCTURE ──
+    # No-structure signals had 25% WR in v1. Bull structure = 35% WR.
+    # Only allow BOS_BEAR or MSS_BEAR.
+    if REQUIRE_BEAR_STRUCTURE:
+        if structure is None: return None
+        if 'BULL' in structure['kind']: return None
 
     # ── GATE 4: Order Block (hard gate) ──
     obs = find_order_blocks(df1_slice, bias, lookback=60)
@@ -525,10 +532,10 @@ def analyse_candle(df_4h, df_1h, df_15m, signal_bar_idx):
     entry = price
     if bias == 'LONG':
         sl = active_ob['bottom'] - atr1 * 0.2
-        sl = min(sl, entry - atr1 * 0.6)
+        sl = min(sl, entry - atr1 * 0.4)  # v2: tighter SL
     else:
         sl = active_ob['top'] + atr1 * 0.2
-        sl = max(sl, entry + atr1 * 0.6)
+        sl = max(sl, entry + atr1 * 0.4)  # v2: tighter SL
 
     risk = abs(entry - sl)
     if risk < entry * 0.001: return None
@@ -673,7 +680,7 @@ async def run_backtest():
 
     print(f"""
 ╔══════════════════════════════════════════════════════╗
-║           SMC PRO v4 — BACKTEST v1.0                ║
+║           SMC PRO v4 — BACKTEST v2.0                ║
 ║  {LOOKBACK_DAYS}d | Top {TOP_N_PAIRS} pairs | Score≥{MIN_SCORE} | 1H trigger   ║
 ║  TP1={TP_RR[0]}R | TP2={TP_RR[1]}R | TP3={TP_RR[2]}R | Timeout={TIMEOUT_HOURS}H  ║
 ╚══════════════════════════════════════════════════════╝
@@ -848,7 +855,7 @@ async def run_backtest():
     # ── Print Results ────────────────────────────────────────────────────────
     print(f"""
 ╔══════════════════════════════════════════════════════╗
-║        📊 SMC PRO v4 BACKTEST — RESULTS             ║
+║      📊 SMC PRO v4 BACKTEST v2 — RESULTS            ║
 ╚══════════════════════════════════════════════════════╝
 
   Settings: Score≥{MIN_SCORE} | 1H trigger | {LOOKBACK_DAYS}d | Top {TOP_N_PAIRS} pairs
