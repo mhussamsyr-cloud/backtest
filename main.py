@@ -34,7 +34,7 @@ logger = logging.getLogger('SMCBacktest')
 # ── SETTINGS (match SMC Pro v4 exactly) ─────────────────────────────────────
 
 LOOKBACK_DAYS        = 180      # 6 months of data
-TOP_N_PAIRS          = 100      # top 100 by volume (SMC is slower per pair, 3 TFs)
+TOP_N_PAIRS          = 600      # top 100 by volume (SMC is slower per pair, 3 TFs)
 MIN_VOLUME_24H       = 5_000_000
 
 # SMC constants
