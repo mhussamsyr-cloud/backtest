@@ -35,7 +35,7 @@ logger = logging.getLogger('SMCBacktest')
 
 LOOKBACK_DAYS        = 180      # 6 months of data
 TOP_N_PAIRS          = 600      # top 100 by volume (SMC is slower per pair, 3 TFs)
-MIN_VOLUME_24H       = 5_000_000
+MIN_VOLUME_24H       = 1_000_000
 
 # SMC constants
 MIN_SCORE            = 85      # RAISED: 83-85 = 46% WR in v2, still bad
