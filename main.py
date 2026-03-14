@@ -31,7 +31,7 @@ warnings.filterwarnings('ignore')
 # ─────────────────────────────────────────────────────────────
 # SETTINGS — exact match to advanced_bot_v6.py
 # ─────────────────────────────────────────────────────────────
-LOOKBACK_DAYS   = 90
+LOOKBACK_DAYS   = 720
 TOP_N_PAIRS     = 600
 MIN_VOLUME_USDT = 3_000_000
 
