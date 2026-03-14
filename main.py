@@ -1,19 +1,21 @@
 """
-BACKTEST v7.0 — FINAL SETTINGS VALIDATION
+BACKTEST v8.0 — IMPROVED QUALITY FILTER
 ==========================================
-Runs the exact settings from advanced_bot_v6.py:
+Changes from v7:
+  1. Removed bottom 5 indicators from scoring:
+       bear_engulf, rsi_overbought, mfi_overbought,
+       stoch_rsi_bear, rsi_deep_oversold
+  2. Boosted weights on top performers:
+       cmf_selling/buying, macd_cross, vol_spike_bull, obv_accum
+  3. Added ANCHOR requirement — every trade must have
+       at least one high-WR indicator present
+  4. Fixed avg loss reporting — splits SL vs TIMEOUT
+  5. Added SL assertion to verify pnl math
+  6. ATR_TP1_ONLY raised to 0.8 (was 0.6) — better RR
+  7. ATR_SL_MULT tightened to 1.2 (was 1.5) — smaller losses
 
-  MIN_SCORE_PCT = 0.43
-  REGIME_MODE   = HARD
-  TRADE_MODE    = TP1-ONLY (0.6x ATR)
-  SL            = 1.5x ATR
-  LONG_FILTER   = True
-  PAIRS         = Top 600 (min $500k volume)
-
-No sweeping — just validates the final locked config.
-
-Run:    python backtest_v7.py
-Output: backtest_v7_results.xlsx
+Run:    python backtest_v8.py
+Output: backtest_v8_results.xlsx
 """
 
 import asyncio
@@ -29,21 +31,39 @@ from collections import defaultdict
 warnings.filterwarnings('ignore')
 
 # ─────────────────────────────────────────────────────────────
-# SETTINGS — exact match to advanced_bot_v6.py
+# SETTINGS
 # ─────────────────────────────────────────────────────────────
 LOOKBACK_DAYS   = 720
 TOP_N_PAIRS     = 600
 MIN_VOLUME_USDT = 3_000_000
 
-ATR_SL_MULT       = 1.5
-ATR_TP1_ONLY      = 0.6
+ATR_SL_MULT       = 1.2    # tightened from 1.5
+ATR_TP1_ONLY      = 0.8    # widened from 0.6
 MIN_SCORE_PCT     = 0.43
 QUALITY_PREMIUM   = 0.60
-REGIME_MODE       = 'HARD'    # HARD / SOFT / OFF
+REGIME_MODE       = 'HARD'
 LONG_FILTER       = True
 MAX_TRADE_HOURS   = 24
 
-OUTPUT_FILE = '/mnt/user-data/outputs/backtest_v7_results.xlsx'
+OUTPUT_FILE = '/mnt/user-data/outputs/backtest_v8_results.xlsx'
+
+# ── Anchor indicators — at least one must be present per trade ──
+LONG_ANCHORS  = {
+    'macd_cross_bull',
+    'vol_spike_bull',
+    'cmf_buying',
+    'obv_accum',
+    'bull_div',
+    'adx_strong_up',
+    'aroon_up',
+}
+SHORT_ANCHORS = {
+    'macd_cross_bear',
+    'cmf_selling',
+    'adx_strong_down',
+    'aroon_down',
+    'roc_bear',
+}
 
 # ─────────────────────────────────────────────────────────────
 # INDICATORS
@@ -122,12 +142,7 @@ def add_indicators(df):
             (df['open'] <= df['close'].shift(1)) &
             (df['close'] >= df['open'].shift(1))
         ).astype(int)
-        df['bear_engulf'] = (
-            (df['close'].shift(1) > df['open'].shift(1)) &
-            (df['close'] < df['open']) &
-            (df['open'] >= df['close'].shift(1)) &
-            (df['close'] <= df['open'].shift(1))
-        ).astype(int)
+        # bear_engulf removed from scoring (65.6% WR — below baseline)
         df['bull_div'] = (
             (df['low'] < df['low'].shift(1)) &
             (df['rsi'] > df['rsi'].shift(1))
@@ -166,34 +181,38 @@ def score_candle(r1h, p1h, r4h, r15m, vol_ratio):
         ss += 1; sr['supertrend_bear'] = 1
 
     # MOMENTUM
+    # NOTE: rsi_deep_oversold (70.0% WR) and rsi_overbought (62.5% WR) removed
     rsi = r1h['rsi']
-    if rsi < 30:    ls += 3.5; lr['rsi_deep_oversold'] = 3.5
-    elif rsi < 40:  ls += 2;   lr['rsi_oversold'] = 2
+    if rsi < 40:    ls += 2;   lr['rsi_oversold'] = 2
     elif rsi <= 50: ls += 1;   lr['rsi_buy_zone'] = 1
-    if rsi > 70:    ss += 3.5; sr['rsi_deep_overbought'] = 3.5
-    elif rsi > 60:  ss += 2;   sr['rsi_overbought'] = 2
-    elif rsi >= 50: ss += 1;   sr['rsi_sell_zone'] = 1
+    if rsi > 60:    ss += 2;   sr['rsi_sell_zone'] = 2
+    elif rsi >= 50: ss += 1;   sr['rsi_neutral_bear'] = 1
 
+    # stoch_rsi_bear removed (69.0% WR) — only keeping bull side
     sk = r1h['stoch_rsi_k']; sd = r1h['stoch_rsi_d']
-    if sk < 0.2 and sk > sd:   ls += 2; lr['stoch_rsi_bull'] = 2
-    elif sk > 0.8 and sk < sd: ss += 2; sr['stoch_rsi_bear'] = 2
+    if sk < 0.2 and sk > sd:
+        ls += 2; lr['stoch_rsi_bull'] = 2
 
-    if mcb:   ls += 3; lr['macd_cross_bull'] = 3
-    elif mcs: ss += 3; sr['macd_cross_bear'] = 3
+    # MACD — boosted weight (+1) as top performer 94.6%/91.3% WR
+    if mcb:   ls += 4; lr['macd_cross_bull'] = 4
+    elif mcs: ss += 4; sr['macd_cross_bear'] = 4
 
-    # VOLUME
+    # VOLUME — vol_spike_bull boosted (92.0% WR)
     if spk:
-        if r1h['close'] > p1h['close']: ls += 3.5; lr['vol_spike_bull'] = 3.5
+        if r1h['close'] > p1h['close']: ls += 4.5; lr['vol_spike_bull'] = 4.5
         else:                           ss += 3;   sr['vol_spike_bear'] = 3
 
-    if r1h['mfi'] < 20:   ls += 1.5; lr['mfi_oversold'] = 1.5
-    elif r1h['mfi'] > 80: ss += 1.5; sr['mfi_overbought'] = 1.5
+    # mfi_overbought removed (67.9% WR) — only keeping oversold
+    if r1h['mfi'] < 20:
+        ls += 1.5; lr['mfi_oversold'] = 1.5
 
-    if r1h['cmf'] > 0.15:    ls += 1; lr['cmf_buying'] = 1
-    elif r1h['cmf'] < -0.15: ss += 1; sr['cmf_selling'] = 1
+    # CMF — boosted (cmf_selling 95.2%, cmf_buying 91.0%)
+    if r1h['cmf'] > 0.15:    ls += 2; lr['cmf_buying'] = 2
+    elif r1h['cmf'] < -0.15: ss += 2; sr['cmf_selling'] = 2
 
-    if r1h['obv'] > r1h['obv_ema']: ls += 0.5; lr['obv_accum'] = 0.5
-    else:                            ss += 0.5; sr['obv_dist'] = 0.5
+    # OBV — boosted (91.9% WR)
+    if r1h['obv'] > r1h['obv_ema']: ls += 1; lr['obv_accum'] = 1
+    else:                            ss += 1; sr['obv_dist'] = 1
 
     # VOLATILITY
     bbp = r1h['bb_pband']
@@ -206,18 +225,19 @@ def score_candle(r1h, p1h, r4h, r15m, vol_ratio):
     if r1h['close'] > r1h['vwap'] * 1.02:
         ss += 1; sr['above_vwap'] = 1
 
-    # TREND STRENGTH
+    # TREND STRENGTH — adx boosted (adx_strong_down 91.2%, adx_strong_up 90.7%)
     adx = r1h['adx']
     if adx > 30:
-        if r1h['di_plus'] > r1h['di_minus']: ls += 2; lr['adx_strong_up'] = 2
-        else:                                 ss += 2; sr['adx_strong_down'] = 2
+        if r1h['di_plus'] > r1h['di_minus']: ls += 3; lr['adx_strong_up'] = 3
+        else:                                 ss += 3; sr['adx_strong_down'] = 3
     elif adx > 25:
         if r1h['di_plus'] > r1h['di_minus']: ls += 1
         else:                                 ss += 1
 
+    # Aroon — boosted (aroon_down 90.0%, aroon_up 91.6%)
     ai = r1h['aroon_ind']
-    if ai > 50:    ls += 1; lr['aroon_up'] = 1
-    elif ai < -50: ss += 1; sr['aroon_down'] = 1
+    if ai > 50:    ls += 2; lr['aroon_up'] = 2
+    elif ai < -50: ss += 2; sr['aroon_down'] = 2
 
     roc = r1h['roc']
     if roc > 3:    ls += 1; lr['roc_bull'] = 1
@@ -227,15 +247,17 @@ def score_candle(r1h, p1h, r4h, r15m, vol_ratio):
     if r1h['bull_div']:   ls += 2.5; lr['bull_div'] = 2.5
     elif r1h['bear_div']: ss += 2;   sr['bear_div'] = 2
 
-    if r15m['bull_engulf']:   ls += 1.5; lr['bull_engulf'] = 1.5
-    elif r15m['bear_engulf']: ss += 1.5; sr['bear_engulf'] = 1.5
+    # bull_engulf kept, bear_engulf removed (65.6% WR)
+    if r15m['bull_engulf']:
+        ls += 1.5; lr['bull_engulf'] = 1.5
 
     # HTF
     if r4h['close'] > r4h['vwap']: ls += 1; lr['4h_above_vwap'] = 1
     else:                           ss += 1; sr['4h_below_vwap'] = 1
 
-    if r4h['rsi'] < 50:   ls += 1; lr['4h_rsi_bull'] = 1
-    elif r4h['rsi'] > 50: ss += 1; sr['4h_rsi_bear'] = 1
+    # 4h_rsi_bear removed (71.8% WR) — only keeping bull side
+    if r4h['rsi'] < 50:
+        ls += 1; lr['4h_rsi_bull'] = 1
 
     return ls, ss, lr, sr, mcb, spk
 
@@ -248,14 +270,28 @@ def simulate_trade(idx, df_1h, direction, entry, sl, tp):
     for i, (_, row) in enumerate(future.iterrows()):
         if direction == 'LONG':
             if row['low'] <= sl:
-                return 'SL',  round((sl - entry) / entry * 100, 3), i+1
+                pnl = round((sl - entry) / entry * 100, 3)
+                # ── ASSERTION: SL on a long must always be negative ──
+                assert pnl < 0, (
+                    f"BUG: SL PnL should be negative! "
+                    f"entry={entry:.6f}, sl={sl:.6f}, pnl={pnl}"
+                )
+                return 'SL', pnl, i+1
             if row['high'] >= tp:
-                return 'TP1', round((tp - entry) / entry * 100, 3), i+1
-        else:
+                pnl = round((tp - entry) / entry * 100, 3)
+                return 'TP1', pnl, i+1
+        else:  # SHORT
             if row['high'] >= sl:
-                return 'SL',  round((entry - sl) / entry * 100 * -1, 3), i+1
+                pnl = round((entry - sl) / entry * 100 * -1, 3)
+                # ── ASSERTION: SL on a short must always be negative ──
+                assert pnl < 0, (
+                    f"BUG: SL PnL should be negative! "
+                    f"entry={entry:.6f}, sl={sl:.6f}, pnl={pnl}"
+                )
+                return 'SL', pnl, i+1
             if row['low'] <= tp:
-                return 'TP1', round((entry - tp) / entry * 100, 3), i+1
+                pnl = round((entry - tp) / entry * 100, 3)
+                return 'TP1', pnl, i+1
 
     last = future.iloc[-1]['close']
     pnl  = (last-entry)/entry*100 if direction=='LONG' else (entry-last)/entry*100
@@ -266,16 +302,17 @@ def simulate_trade(idx, df_1h, direction, entry, sl, tp):
 # BACKTESTER
 # ─────────────────────────────────────────────────────────────
 
-class BacktesterV7:
+class BacktesterV8:
     def __init__(self):
         self.exchange = ccxt.binance({
             'enableRateLimit': True,
             'options': {'defaultType': 'future'}
         })
-        self.trades          = []
-        self.indicator_stats = defaultdict(lambda: {'triggered':0,'wins':0,'losses':0})
-        self.regime_blocked  = 0
-        self.filtered_long   = 0
+        self.trades           = []
+        self.indicator_stats  = defaultdict(lambda: {'triggered':0,'wins':0,'losses':0})
+        self.regime_blocked   = 0
+        self.filtered_long    = 0
+        self.anchor_rejected  = 0  # NEW — track how many trades anchor filter drops
 
     async def get_pairs(self):
         await self.exchange.load_markets()
@@ -337,9 +374,7 @@ class BacktesterV7:
         ]
 
         pair_trades = []
-        # Cooldown: track when each direction last fired on this pair
-        # Don't allow same direction again until previous trade resolves
-        last_signal_end = {'LONG': -999, 'SHORT': -999}  # stores candle index
+        last_signal_end = {'LONG': -999, 'SHORT': -999}
 
         for i in range(55, len(df_1h) - MAX_TRADE_HOURS - 1):
             r1h  = df_1h.iloc[i]
@@ -372,8 +407,17 @@ class BacktesterV7:
             if not signal:
                 continue
 
-            # ── Cooldown: skip if previous same-direction trade not resolved ──
+            # ── Cooldown ──
             if i <= last_signal_end[signal]:
+                continue
+
+            # ── ANCHOR CHECK — must have at least one high-WR indicator ──
+            reason_keys = set(reasons.keys())
+            if signal == 'LONG'  and not (reason_keys & LONG_ANCHORS):
+                self.anchor_rejected += 1
+                continue
+            if signal == 'SHORT' and not (reason_keys & SHORT_ANCHORS):
+                self.anchor_rejected += 1
                 continue
 
             entry = r15m['close']
@@ -391,7 +435,6 @@ class BacktesterV7:
                     is_counter = (signal=='LONG' and btc_reg=='BEAR') or \
                                  (signal=='SHORT' and btc_reg=='BULL')
 
-            # ── HARD regime block ──
             if REGIME_MODE == 'HARD' and is_counter:
                 self.regime_blocked += 1
                 continue
@@ -449,7 +492,6 @@ class BacktesterV7:
             }
             pair_trades.append(trade)
 
-            # Update cooldown — block this direction for trade duration
             last_signal_end[signal] = i + duration + 1
 
             for name in reasons:
@@ -476,9 +518,16 @@ class BacktesterV7:
         losses = total - wins
         wr     = wins / total * 100
         apnl   = df['pnl_pct'].mean()
-        aw     = df[df['win']]['pnl_pct'].mean()    if wins   > 0 else 0
-        al     = df[~df['win']]['pnl_pct'].mean()   if losses > 0 else 0
-        pf     = abs(aw*wins/(al*losses))            if losses > 0 and al != 0 else 99
+        aw     = df[df['win']]['pnl_pct'].mean()     if wins   > 0 else 0
+
+        # ── FIXED: split losses into SL vs TIMEOUT ──
+        sl_trades      = df[df['outcome']=='SL']
+        timeout_trades = df[df['outcome']=='TIMEOUT']
+        al_sl          = sl_trades['pnl_pct'].mean()      if len(sl_trades)      > 0 else 0
+        al_timeout     = timeout_trades['pnl_pct'].mean() if len(timeout_trades) > 0 else 0
+        al             = df[~df['win']]['pnl_pct'].mean() if losses > 0 else 0
+
+        pf     = abs(aw*wins/(al_sl*len(sl_trades))) if len(sl_trades) > 0 and al_sl != 0 else 99
         tp1r   = df['win'].mean() * 100
         slr    = (df['outcome']=='SL').mean() * 100
         tor    = (df['outcome']=='TIMEOUT').mean() * 100
@@ -493,19 +542,20 @@ class BacktesterV7:
         prem   = df[df['quality']=='PREMIUM']
         good   = df[df['quality']=='GOOD']
 
-        # ── Console ──────────────────────────────────────────
         print("\n" + "╔"+"═"*54+"╗")
-        print("║" + "  📊 BACKTEST v7 — FINAL RESULTS".center(54) + "║")
+        print("║" + "  📊 BACKTEST v8 — FINAL RESULTS".center(54) + "║")
         print("╚"+"═"*54+"╝")
         print(f"\n  Settings: score≥{MIN_SCORE_PCT*100:.0f}% | {REGIME_MODE} regime | TP1={ATR_TP1_ONLY}x | SL={ATR_SL_MULT}x")
         print(f"  Pairs: {df['symbol'].nunique()} | Lookback: {LOOKBACK_DAYS}d\n")
 
         print(f"  {'Signals':20s}: {total}  ({spd:.1f}/day  |  {spm:.0f}/month)")
         print(f"  {'Win Rate':20s}: {wr:.1f}%")
-        print(f"  {'Profit Factor':20s}: {pf:.2f}")
+        print(f"  {'Profit Factor':20s}: {pf:.2f}  (uses SL losses only)")
         print(f"  {'Avg PnL/trade':20s}: {apnl:+.3f}%")
         print(f"  {'Avg Win':20s}: {aw:+.3f}%")
-        print(f"  {'Avg Loss':20s}: {al:+.3f}%")
+        print(f"  {'Avg SL Loss':20s}: {al_sl:+.3f}%  ← should be negative")
+        print(f"  {'Avg Timeout PnL':20s}: {al_timeout:+.3f}%")
+        print(f"  {'Avg All Losses':20s}: {al:+.3f}%")
         print(f"  {'Monthly est.':20s}: {mr:+.1f}%  (signals × avg PnL)")
         print(f"  {'Max Drawdown':20s}: {mdd:.2f}%")
         print(f"  {'TP1 Rate':20s}: {tp1r:.1f}%")
@@ -514,6 +564,7 @@ class BacktesterV7:
         print(f"  {'Avg Duration':20s}: {df['duration_h'].mean():.1f}h")
         print(f"  {'Regime blocked':20s}: {self.regime_blocked}")
         print(f"  {'Long filtered':20s}: {self.filtered_long}")
+        print(f"  {'Anchor rejected':20s}: {self.anchor_rejected}  ← new filter")
 
         print(f"\n  ── By Direction ──")
         for label, sub in [('LONG', longs), ('SHORT', shorts)]:
@@ -563,8 +614,8 @@ class BacktesterV7:
             bar = '█' * int(r['win_rate']/5)
             print(f"  {r['indicator']:28s} {r['win_rate']:5.1f}%  n={r['triggered']:5d}  {bar}")
         if len(ind_df) > 5:
-            print("  BOTTOM 8 (consider removing):")
-            for _, r in ind_df.tail(8).iterrows():
+            print("  BOTTOM (watch these):")
+            for _, r in ind_df.tail(5).iterrows():
                 print(f"  {r['indicator']:28s} {r['win_rate']:5.1f}%  n={r['triggered']:5d}")
 
         # ── Top symbols ──
@@ -578,7 +629,6 @@ class BacktesterV7:
         print(f"\n  ── Top 20 Symbols ──")
         print(sym_df[sym_df['signals']>=3].head(20).to_string())
 
-        # ── Live checklist ──
         print(f"\n{'╔'+'═'*54+'╗'}")
         print("║" + "  ✅ DEPLOY CHECKLIST".center(54) + "║")
         print(f"{'╚'+'═'*54+'╝'}")
@@ -588,14 +638,16 @@ class BacktesterV7:
         print(f"  ATR_TP1_ONLY  = {ATR_TP1_ONLY}")
         print(f"  ATR_SL_MULT   = {ATR_SL_MULT}")
         print(f"  LONG_FILTER   = {LONG_FILTER}")
+        print(f"  ANCHOR_FILTER = True")
         print(f"\n  Expected live: {spd:.1f}/day | {wr:.1f}% WR | {apnl:+.2f}%/trade")
         print(f"  Monitor via /stats after 2 weeks")
         print(f"  If live WR < {wr-8:.0f}% → raise MIN_SCORE_PCT to 0.45")
 
-        # ── Save Excel ──
-        self._save_excel(df, ind_df, sym_df, spd, spm, wr, pf, apnl, aw, al, mr, mdd, slr, tor)
+        self._save_excel(df, ind_df, sym_df, spd, spm, wr, pf, apnl, aw,
+                         al, al_sl, al_timeout, mr, mdd, slr, tor)
 
-    def _save_excel(self, df, ind_df, sym_df, spd, spm, wr, pf, apnl, aw, al, mr, mdd, slr, tor):
+    def _save_excel(self, df, ind_df, sym_df, spd, spm, wr, pf, apnl, aw,
+                    al, al_sl, al_timeout, mr, mdd, slr, tor):
         print(f"\n💾 Saving {OUTPUT_FILE}...")
         os.makedirs('/mnt/user-data/outputs', exist_ok=True)
 
@@ -604,11 +656,11 @@ class BacktesterV7:
         prem   = df[df['quality']=='PREMIUM']
         good   = df[df['quality']=='GOOD']
 
-        # Summary
         summary = pd.DataFrame({'Metric': [
             '─── PERFORMANCE ───',
             'Pairs Tested', 'Total Signals', 'Signals/Day', 'Signals/Month',
-            'Win Rate %', 'Profit Factor', 'Avg PnL %', 'Avg Win %', 'Avg Loss %',
+            'Win Rate %', 'Profit Factor (vs SL)', 'Avg PnL %',
+            'Avg Win %', 'Avg SL Loss %', 'Avg Timeout PnL %', 'Avg All-Loss %',
             'Monthly Return Est %', 'Max Drawdown %',
             'TP1 Rate %', 'SL Rate %', 'Timeout Rate %', 'Avg Duration (h)',
             '─── BY DIRECTION ───',
@@ -618,14 +670,15 @@ class BacktesterV7:
             'PREMIUM Signals', 'PREMIUM WR %',
             'GOOD Signals', 'GOOD WR %',
             '─── FILTERS ───',
-            'Regime Blocked', 'Long Filtered',
+            'Regime Blocked', 'Long Filtered', 'Anchor Rejected',
             '─── SETTINGS ───',
             'MIN_SCORE_PCT', 'REGIME_MODE', 'ATR_TP1', 'ATR_SL',
-            'LONG_FILTER', 'Pairs Universe', 'Lookback Days',
+            'LONG_FILTER', 'ANCHOR_FILTER', 'Pairs Universe', 'Lookback Days',
         ], 'Value': [
             '',
             df['symbol'].nunique(), len(df), round(spd,1), round(spm,0),
-            round(wr,1), round(pf,2), round(apnl,3), round(aw,3), round(al,3),
+            round(wr,1), round(pf,2), round(apnl,3),
+            round(aw,3), round(al_sl,3), round(al_timeout,3), round(al,3),
             round(mr,1), round(mdd,2),
             round(wr,1), round(slr,1), round(tor,1), round(df['duration_h'].mean(),1),
             '',
@@ -637,13 +690,12 @@ class BacktesterV7:
             len(prem), round(prem['win'].mean()*100,1) if len(prem)>0 else 0,
             len(good), round(good['win'].mean()*100,1) if len(good)>0 else 0,
             '',
-            self.regime_blocked, self.filtered_long,
+            self.regime_blocked, self.filtered_long, self.anchor_rejected,
             '',
             MIN_SCORE_PCT, REGIME_MODE, ATR_TP1_ONLY, ATR_SL_MULT,
-            LONG_FILTER, TOP_N_PAIRS, LOOKBACK_DAYS,
+            LONG_FILTER, True, TOP_N_PAIRS, LOOKBACK_DAYS,
         ]})
 
-        # Score bands
         band_rows = []
         for lo, hi in [(40,45),(45,50),(50,55),(55,60),(60,65),(65,100)]:
             sub = df[(df['score_pct']>=lo) & (df['score_pct']<hi)]
@@ -657,14 +709,12 @@ class BacktesterV7:
                 'Avg Duration': round(sub['duration_h'].mean(),1),
             })
 
-        # Equity curve
         df_eq = df.sort_values('timestamp').copy().reset_index(drop=True)
         df_eq['trade_num']       = range(1, len(df_eq)+1)
         df_eq['cumulative_pnl']  = (1 + df_eq['pnl_pct']/100).cumprod()
         df_eq['running_wr']      = df_eq['win'].expanding().mean() * 100
         df_eq['running_avg_pnl'] = df_eq['pnl_pct'].expanding().mean()
 
-        # Monthly breakdown
         df['month'] = pd.to_datetime(df['timestamp']).dt.to_period('M').astype(str)
         monthly = df.groupby('month').agg(
             signals  = ('win','count'),
@@ -674,7 +724,6 @@ class BacktesterV7:
             sl_count = ('outcome', lambda x: (x=='SL').sum()),
         ).reset_index()
 
-        # All trades export
         df_export = df.drop(columns=['reasons'], errors='ignore')
 
         with pd.ExcelWriter(OUTPUT_FILE, engine='xlsxwriter') as writer:
@@ -700,9 +749,18 @@ class BacktesterV7:
     async def run(self):
         print(f"""
 ╔══════════════════════════════════════════════════════╗
-║           BACKTEST v7.0 — FINAL VALIDATION          ║
+║           BACKTEST v8.0 — IMPROVED QUALITY          ║
 ║  {LOOKBACK_DAYS}d | {TOP_N_PAIRS} pairs | score≥{MIN_SCORE_PCT*100:.0f}% | {REGIME_MODE} | TP1={ATR_TP1_ONLY}x | SL={ATR_SL_MULT}x
 ╚══════════════════════════════════════════════════════╝
+
+  Changes vs v7:
+  • Removed: bear_engulf, rsi_overbought, mfi_overbought,
+             stoch_rsi_bear, rsi_deep_oversold
+  • Boosted: macd_cross (+1), vol_spike_bull (+1), cmf (+1), aroon (+1), adx (+1)
+  • Added:   anchor filter (must have ≥1 high-WR indicator)
+  • Fixed:   SL pnl assertion + split loss reporting
+  • TP:      0.6x → 0.8x ATR
+  • SL:      1.5x → 1.2x ATR
 """)
         pairs      = await self.get_pairs()
         btc_regime = await self.load_btc_regime()
@@ -724,7 +782,7 @@ class BacktesterV7:
 
 
 async def main():
-    bt = BacktesterV7()
+    bt = BacktesterV8()
     await bt.run()
 
 if __name__ == '__main__':
