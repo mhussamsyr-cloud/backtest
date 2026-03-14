@@ -13,7 +13,7 @@ Runs the exact settings from advanced_bot_v6.py:
 No sweeping — just validates the final locked config.
 
 Run:    python backtest_v7.py
-Output: backtest_v9_rr2_results.xlsx
+Output: backtest_v7_results.xlsx
 """
 
 import asyncio
@@ -31,19 +31,19 @@ warnings.filterwarnings('ignore')
 # ─────────────────────────────────────────────────────────────
 # SETTINGS — exact match to advanced_bot_v6.py
 # ─────────────────────────────────────────────────────────────
-LOOKBACK_DAYS   = 720
+LOOKBACK_DAYS   = 90
 TOP_N_PAIRS     = 600
-MIN_VOLUME_USDT = 500_000
+MIN_VOLUME_USDT = 3_000_000
 
 ATR_SL_MULT       = 1.5
-ATR_TP1_ONLY      = 3.0   # 1:2 RR — 3.0/1.5 = 2.0R exactly
+ATR_TP1_ONLY      = 0.6
 MIN_SCORE_PCT     = 0.43
 QUALITY_PREMIUM   = 0.60
 REGIME_MODE       = 'HARD'    # HARD / SOFT / OFF
 LONG_FILTER       = True
-MAX_TRADE_HOURS   = 48    # extended — 3x ATR target needs more time to hit
+MAX_TRADE_HOURS   = 24
 
-OUTPUT_FILE = '/mnt/user-data/outputs/backtest_v9_rr2_results.xlsx'
+OUTPUT_FILE = '/mnt/user-data/outputs/backtest_v7_results.xlsx'
 
 # ─────────────────────────────────────────────────────────────
 # INDICATORS
@@ -266,7 +266,7 @@ def simulate_trade(idx, df_1h, direction, entry, sl, tp):
 # BACKTESTER
 # ─────────────────────────────────────────────────────────────
 
-class BacktesterV9:
+class BacktesterV7:
     def __init__(self):
         self.exchange = ccxt.binance({
             'enableRateLimit': True,
@@ -495,7 +495,7 @@ class BacktesterV9:
 
         # ── Console ──────────────────────────────────────────
         print("\n" + "╔"+"═"*54+"╗")
-        print("║" + "  📊 BACKTEST v9 — 1:2 RR RESULTS".center(54) + "║")
+        print("║" + "  📊 BACKTEST v7 — FINAL RESULTS".center(54) + "║")
         print("╚"+"═"*54+"╝")
         print(f"\n  Settings: score≥{MIN_SCORE_PCT*100:.0f}% | {REGIME_MODE} regime | TP1={ATR_TP1_ONLY}x | SL={ATR_SL_MULT}x")
         print(f"  Pairs: {df['symbol'].nunique()} | Lookback: {LOOKBACK_DAYS}d\n")
@@ -724,7 +724,7 @@ class BacktesterV9:
 
 
 async def main():
-    bt = BacktesterV9()
+    bt = BacktesterV7()
     await bt.run()
 
 if __name__ == '__main__':
