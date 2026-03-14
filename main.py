@@ -1,21 +1,17 @@
 """
-BACKTEST v8.0 — IMPROVED QUALITY FILTER
+BACKTEST v9.0 — COOLDOWN + SHORT FILTER
 ==========================================
-Changes from v7:
-  1. Removed bottom 5 indicators from scoring:
-       bear_engulf, rsi_overbought, mfi_overbought,
-       stoch_rsi_bear, rsi_deep_oversold
-  2. Boosted weights on top performers:
-       cmf_selling/buying, macd_cross, vol_spike_bull, obv_accum
-  3. Added ANCHOR requirement — every trade must have
-       at least one high-WR indicator present
-  4. Fixed avg loss reporting — splits SL vs TIMEOUT
-  5. Added SL assertion to verify pnl math
-  6. ATR_TP1_ONLY raised to 0.8 (was 0.6) — better RR
-  7. ATR_SL_MULT tightened to 1.2 (was 1.5) — smaller losses
+Changes from v8:
+  1. MIN_COOLDOWN_CANDLES = 3 — per-pair minimum cooldown
+       regardless of trade duration, kills churn from fast SL exits
+  2. MIN_SCORE_SHORT = 0.48 — shorts need higher threshold
+       (shorts: 78.3% WR vs longs: 84.8% WR in v8, needed filtering)
+  3. Removed upper_bb (52.9% WR — coin flip) and
+       rsi_neutral_bear (50.0% WR — literally random)
+  4. Fixed Excel engine: xlsxwriter → openpyxl
 
-Run:    python backtest_v8.py
-Output: backtest_v8_results.xlsx
+Run:    python backtest_v9.py
+Output: backtest_v9_results.xlsx
 """
 
 import asyncio
@@ -37,15 +33,17 @@ LOOKBACK_DAYS   = 720
 TOP_N_PAIRS     = 600
 MIN_VOLUME_USDT = 3_000_000
 
-ATR_SL_MULT       = 1.2    # tightened from 1.5
-ATR_TP1_ONLY      = 0.8    # widened from 0.6
-MIN_SCORE_PCT     = 0.43
+ATR_SL_MULT       = 1.2
+ATR_TP1_ONLY      = 0.8
+MIN_SCORE_PCT     = 0.43   # long threshold
+MIN_SCORE_SHORT   = 0.48   # NEW: shorts need higher bar (78.3% WR vs 84.8% longs in v8)
+MIN_COOLDOWN_CANDLES = 3   # NEW: minimum candles between same-direction trades per pair
 QUALITY_PREMIUM   = 0.60
 REGIME_MODE       = 'HARD'
 LONG_FILTER       = True
 MAX_TRADE_HOURS   = 24
 
-OUTPUT_FILE = '/mnt/user-data/outputs/backtest_v8_results.xlsx'
+OUTPUT_FILE = '/mnt/user-data/outputs/backtest_v9_results.xlsx'
 
 # ── Anchor indicators — at least one must be present per trade ──
 LONG_ANCHORS  = {
@@ -182,11 +180,11 @@ def score_candle(r1h, p1h, r4h, r15m, vol_ratio):
 
     # MOMENTUM
     # NOTE: rsi_deep_oversold (70.0% WR) and rsi_overbought (62.5% WR) removed
+    # rsi_neutral_bear removed (50.0% WR — random noise)
     rsi = r1h['rsi']
     if rsi < 40:    ls += 2;   lr['rsi_oversold'] = 2
     elif rsi <= 50: ls += 1;   lr['rsi_buy_zone'] = 1
     if rsi > 60:    ss += 2;   sr['rsi_sell_zone'] = 2
-    elif rsi >= 50: ss += 1;   sr['rsi_neutral_bear'] = 1
 
     # stoch_rsi_bear removed (69.0% WR) — only keeping bull side
     sk = r1h['stoch_rsi_k']; sd = r1h['stoch_rsi_d']
@@ -215,9 +213,9 @@ def score_candle(r1h, p1h, r4h, r15m, vol_ratio):
     else:                            ss += 1; sr['obv_dist'] = 1
 
     # VOLATILITY
+    # upper_bb removed (52.9% WR — coin flip)
     bbp = r1h['bb_pband']
-    if bbp < 0.1:   ls += 2.5; lr['lower_bb'] = 2.5
-    elif bbp > 0.9: ss += 2.5; sr['upper_bb'] = 2.5
+    if bbp < 0.1: ls += 2.5; lr['lower_bb'] = 2.5
 
     if r1h['cci'] < -150:  ls += 1.5; lr['cci_oversold'] = 1.5
     elif r1h['cci'] > 150: ss += 1.5; sr['cci_overbought'] = 1.5
@@ -302,7 +300,7 @@ def simulate_trade(idx, df_1h, direction, entry, sl, tp):
 # BACKTESTER
 # ─────────────────────────────────────────────────────────────
 
-class BacktesterV8:
+class BacktesterV9:
     def __init__(self):
         self.exchange = ccxt.binance({
             'enableRateLimit': True,
@@ -397,25 +395,24 @@ class BacktesterV8:
 
             ls, ss, lr, sr, mcb, spk = score_candle(r1h, p1h, r4h, r15m, vol_ratio)
 
-            # ── Max achievable scores after v8 weight boosts ──
-            # Long:  3+2+1+2+2+4+4.5+1.5+2+1+2.5+1.5+3+2+1+2.5+1.5+1+1 = 40.0
-            # Short: 3+2+1+2+1+4+3+2+1+2.5+1.5+1+3+2+1+2+1 = 33.0
-            # Use direction-aware max so threshold stays meaningful
-            if ls >= ss:
-                max_score = 40.0
-            else:
-                max_score = 33.0
-            thresh = max_score * MIN_SCORE_PCT
+            # Direction-aware max scores (after v9 removals):
+            # upper_bb (-2.5) and rsi_neutral_bear (-1) removed from short side
+            # Long max:  ~40.0 | Short max: ~29.5
+            max_score_long  = 40.0
+            max_score_short = 29.5
+
+            thresh_long  = max_score_long  * MIN_SCORE_PCT    # 0.43
+            thresh_short = max_score_short * MIN_SCORE_SHORT   # 0.48 — tighter
 
             signal = None
-            if ls > ss and ls >= thresh:
-                signal = 'LONG';  score = ls; reasons = lr
-            elif ss > ls and ss >= thresh:
-                signal = 'SHORT'; score = ss; reasons = sr
+            if ls > ss and ls >= thresh_long:
+                signal = 'LONG';  score = ls; max_score = max_score_long;  reasons = lr
+            elif ss > ls and ss >= thresh_short:
+                signal = 'SHORT'; score = ss; max_score = max_score_short; reasons = sr
             if not signal:
                 continue
 
-            # ── Cooldown ──
+            # ── Cooldown: minimum 3 candles OR trade duration, whichever longer ──
             if i <= last_signal_end[signal]:
                 continue
 
@@ -506,7 +503,8 @@ class BacktesterV8:
             }
             pair_trades.append(trade)
 
-            last_signal_end[signal] = i + duration + 1
+            # Enforce minimum cooldown regardless of how fast trade resolved
+            last_signal_end[signal] = i + max(duration + 1, MIN_COOLDOWN_CANDLES)
 
             for name in reasons:
                 self.indicator_stats[name]['triggered'] += 1
@@ -557,7 +555,7 @@ class BacktesterV8:
         good   = df[df['quality']=='GOOD']
 
         print("\n" + "╔"+"═"*54+"╗")
-        print("║" + "  📊 BACKTEST v8 — FINAL RESULTS".center(54) + "║")
+        print("║" + "  📊 BACKTEST v9 — FINAL RESULTS".center(54) + "║")
         print("╚"+"═"*54+"╝")
         print(f"\n  Settings: score≥{MIN_SCORE_PCT*100:.0f}% | {REGIME_MODE} regime | TP1={ATR_TP1_ONLY}x | SL={ATR_SL_MULT}x")
         print(f"  Pairs: {df['symbol'].nunique()} | Lookback: {LOOKBACK_DAYS}d\n")
@@ -643,19 +641,21 @@ class BacktesterV8:
         print(f"\n  ── Top 20 Symbols ──")
         print(sym_df[sym_df['signals']>=3].head(20).to_string())
 
-        print(f"\n{'╔'+'═'*54+'╗'}")
+        print(f"{'╔'+'═'*54+'╗'}")
         print("║" + "  ✅ DEPLOY CHECKLIST".center(54) + "║")
         print(f"{'╚'+'═'*54+'╝'}")
-        print(f"  TRADE_MODE    = 'TP1_ONLY'")
-        print(f"  REGIME_MODE   = '{REGIME_MODE}'")
-        print(f"  MIN_SCORE_PCT = {MIN_SCORE_PCT}")
-        print(f"  ATR_TP1_ONLY  = {ATR_TP1_ONLY}")
-        print(f"  ATR_SL_MULT   = {ATR_SL_MULT}")
-        print(f"  LONG_FILTER   = {LONG_FILTER}")
-        print(f"  ANCHOR_FILTER = True")
+        print(f"  TRADE_MODE       = 'TP1_ONLY'")
+        print(f"  REGIME_MODE      = '{REGIME_MODE}'")
+        print(f"  MIN_SCORE_PCT    = {MIN_SCORE_PCT}  (longs)")
+        print(f"  MIN_SCORE_SHORT  = {MIN_SCORE_SHORT}  (shorts)")
+        print(f"  ATR_TP1_ONLY     = {ATR_TP1_ONLY}")
+        print(f"  ATR_SL_MULT      = {ATR_SL_MULT}")
+        print(f"  LONG_FILTER      = {LONG_FILTER}")
+        print(f"  ANCHOR_FILTER    = True")
+        print(f"  MIN_COOLDOWN     = {MIN_COOLDOWN_CANDLES} candles")
         print(f"\n  Expected live: {spd:.1f}/day | {wr:.1f}% WR | {apnl:+.2f}%/trade")
         print(f"  Monitor via /stats after 2 weeks")
-        print(f"  If live WR < {wr-8:.0f}% → raise MIN_SCORE_PCT to 0.45")
+        print(f"  If live WR < {wr-8:.0f}% → raise MIN_SCORE_PCT to 0.45 / MIN_SCORE_SHORT to 0.50")
 
         self._save_excel(df, ind_df, sym_df, spd, spm, wr, pf, apnl, aw,
                          al, al_sl, al_timeout, mr, mdd, slr, tor)
@@ -740,7 +740,7 @@ class BacktesterV8:
 
         df_export = df.drop(columns=['reasons'], errors='ignore')
 
-        with pd.ExcelWriter(OUTPUT_FILE, engine='xlsxwriter') as writer:
+        with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl') as writer:
             summary.to_excel(writer, sheet_name='📊 Summary', index=False)
             pd.DataFrame(band_rows).to_excel(writer, sheet_name='📈 Score Bands', index=False)
             monthly.to_excel(writer, sheet_name='📅 Monthly', index=False)
@@ -763,18 +763,15 @@ class BacktesterV8:
     async def run(self):
         print(f"""
 ╔══════════════════════════════════════════════════════╗
-║           BACKTEST v8.0 — IMPROVED QUALITY          ║
-║  {LOOKBACK_DAYS}d | {TOP_N_PAIRS} pairs | score≥{MIN_SCORE_PCT*100:.0f}% | {REGIME_MODE} | TP1={ATR_TP1_ONLY}x | SL={ATR_SL_MULT}x
+║           BACKTEST v9.0 — COOLDOWN + SHORT FILTER   ║
+║  {LOOKBACK_DAYS}d | {TOP_N_PAIRS} pairs | L≥{MIN_SCORE_PCT*100:.0f}% S≥{MIN_SCORE_SHORT*100:.0f}% | {REGIME_MODE} | TP={ATR_TP1_ONLY}x SL={ATR_SL_MULT}x | cd≥{MIN_COOLDOWN_CANDLES}
 ╚══════════════════════════════════════════════════════╝
 
-  Changes vs v7:
-  • Removed: bear_engulf, rsi_overbought, mfi_overbought,
-             stoch_rsi_bear, rsi_deep_oversold
-  • Boosted: macd_cross (+1), vol_spike_bull (+1), cmf (+1), aroon (+1), adx (+1)
-  • Added:   anchor filter (must have ≥1 high-WR indicator)
-  • Fixed:   SL pnl assertion + split loss reporting
-  • TP:      0.6x → 0.8x ATR
-  • SL:      1.5x → 1.2x ATR
+  Changes vs v8:
+  • Cooldown: max(trade_duration, {MIN_COOLDOWN_CANDLES}) candles min — kills fast-SL churn
+  • Shorts:   threshold raised 0.43 → 0.48 (longs stay 0.43)
+  • Removed:  upper_bb (52.9% WR), rsi_neutral_bear (50.0% WR)
+  • Fixed:    Excel engine openpyxl
 """)
         pairs      = await self.get_pairs()
         btc_regime = await self.load_btc_regime()
@@ -796,7 +793,7 @@ class BacktesterV8:
 
 
 async def main():
-    bt = BacktesterV8()
+    bt = BacktesterV9()
     await bt.run()
 
 if __name__ == '__main__':
