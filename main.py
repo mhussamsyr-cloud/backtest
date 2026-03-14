@@ -282,7 +282,7 @@ def simulate_trade(idx, df_1h, direction, entry, sl, tp):
                 return 'TP1', pnl, i+1
         else:  # SHORT
             if row['high'] >= sl:
-                pnl = round((entry - sl) / entry * 100 * -1, 3)
+                pnl = round((entry - sl) / entry * 100, 3)  # entry < sl → negative ✓
                 # ── ASSERTION: SL on a short must always be negative ──
                 assert pnl < 0, (
                     f"BUG: SL PnL should be negative! "
@@ -396,8 +396,16 @@ class BacktesterV8:
             vol_ratio = r1h['volume'] / vol_avg if vol_avg > 0 else 1.0
 
             ls, ss, lr, sr, mcb, spk = score_candle(r1h, p1h, r4h, r15m, vol_ratio)
-            max_score = 35
-            thresh    = max_score * MIN_SCORE_PCT
+
+            # ── Max achievable scores after v8 weight boosts ──
+            # Long:  3+2+1+2+2+4+4.5+1.5+2+1+2.5+1.5+3+2+1+2.5+1.5+1+1 = 40.0
+            # Short: 3+2+1+2+1+4+3+2+1+2.5+1.5+1+3+2+1+2+1 = 33.0
+            # Use direction-aware max so threshold stays meaningful
+            if ls >= ss:
+                max_score = 40.0
+            else:
+                max_score = 33.0
+            thresh = max_score * MIN_SCORE_PCT
 
             signal = None
             if ls > ss and ls >= thresh:
@@ -461,6 +469,12 @@ class BacktesterV8:
             else:
                 sl = entry + atr * ATR_SL_MULT
                 tp = entry - atr * ATR_TP1_ONLY
+
+            # ── Sanity guard: sl/tp must make directional sense ──
+            if signal == 'LONG'  and sl >= entry: continue
+            if signal == 'SHORT' and sl <= entry: continue
+            if signal == 'LONG'  and tp <= entry: continue
+            if signal == 'SHORT' and tp >= entry: continue
 
             risk_pct = abs((sl - entry) / entry * 100)
             gain_pct = abs((tp - entry) / entry * 100)
