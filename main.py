@@ -1,8 +1,8 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     SMC PRO v4 — BACKTEST v3.0                              ║
+║     SMC PRO v4 — BACKTEST v4.0                              ║
 ║                                                              ║
-║  Changes from v2 (based on backtest data):                 ║
+║  Changes from v3 (based on backtest data):                 ║
 ║    - SHORT ONLY: LONGs killed (35% WR → net loser)         ║
 ║    - MIN_SCORE: 75 → 83  (75-82 band = 43% WR, useless)   ║
 ║    - BEAR STRUCTURE REQUIRED: BOS_BULL/MSS_BULL blocked    ║
@@ -14,7 +14,7 @@
 ║    - TIMEOUT: 48H → 72H (give trades room to develop)      ║
 ║                                                              ║
 ║  Target: WR>55%, PF>2.0, MaxDD<25%                        ║
-║  Output: backtest_smc_v3_results.xlsx                       ║
+║  Output: backtest_smc_v4_results.xlsx                       ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -38,8 +38,8 @@ TOP_N_PAIRS          = 600      # top 100 by volume (SMC is slower per pair, 3 T
 MIN_VOLUME_24H       = 1_000_000
 
 # SMC constants
-MIN_SCORE            = 85      # RAISED: 83-85 = 46% WR in v2, still bad
-OB_TOLERANCE_PCT     = 0.008
+MIN_SCORE            = 83      # RELAXED: recover volume (FVG gate compensates)
+OB_TOLERANCE_PCT     = 0.012   # WIDENED: 0.8% → 1.2%, more OB entries
 OB_IMPULSE_ATR_MULT  = 1.0
 STRUCTURE_LOOKBACK   = 20
 HH_LL_LOOKBACK       = 10
@@ -49,10 +49,13 @@ HH_LL_BONUS          = 8
 SHORT_ONLY           = True    # LONGs = 35% WR in v1, net negative
 REQUIRE_BEAR_STRUCTURE = True  # BOS_BEAR or MSS_BEAR only
 
-# v3 NEW filters
+# v3 filters (kept)
 REQUIRE_BOS_ONLY     = True    # BOS_BEAR only — MSS_BEAR = 0% WR in v2
 BLOCK_SWEEP          = True    # Sweep=YES = 40% WR vs 62.9% without — kill it
 REQUIRE_TRENDING     = True    # HH/LL required — ranging = 33% WR in v2
+
+# v4 NEW filter
+REQUIRE_FVG          = True    # FVG=YES → 75% WR vs 60% without in v3
 
 # Trade management
 TP_RR                = [2.0, 3.5, 5.5]     # unchanged from v2
@@ -63,7 +66,7 @@ TIMEOUT_HOURS        = 48      # back to 48H — 72H didn't help, TP3 hit 40% fi
 RISK_PER_TRADE       = 0.02
 MAX_CONCURRENT       = 5
 
-OUTPUT_FILE = '/mnt/user-data/outputs/backtest_smc_v3_results.xlsx'
+OUTPUT_FILE = '/mnt/user-data/outputs/backtest_smc_v4_results.xlsx'
 
 
 # ── INDICATORS (identical to live bot) ──────────────────────────────────────
@@ -532,6 +535,11 @@ def analyse_candle(df_4h, df_1h, df_15m, signal_bar_idx):
 
     sweep = recent_liquidity_sweep(df1_slice, bias, highs1, lows1, lookback=20)
 
+    # ── v4 GATE: REQUIRE FVG overlapping OB ──
+    # FVG=YES → 75% WR in v3 vs 60% without. Require it.
+    if REQUIRE_FVG and fvg_near is None:
+        return None
+
     # ── v3 GATE: BLOCK SWEEP setups ──
     # Sweep=YES = 40% WR in v2 vs 62.9% without sweep. Kill them.
     if BLOCK_SWEEP and sweep is not None:
@@ -875,7 +883,7 @@ async def run_backtest():
     # ── Print Results ────────────────────────────────────────────────────────
     print(f"""
 ╔══════════════════════════════════════════════════════╗
-║      📊 SMC PRO v4 BACKTEST v3 — RESULTS            ║
+║      📊 SMC PRO v4 BACKTEST v4 — RESULTS            ║
 ╚══════════════════════════════════════════════════════╝
 
   Settings: Score≥{MIN_SCORE} | 1H trigger | {LOOKBACK_DAYS}d | Top {TOP_N_PAIRS} pairs
