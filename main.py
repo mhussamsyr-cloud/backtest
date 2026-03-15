@@ -1,19 +1,22 @@
 """
-BACKTEST v10.0 — LONGS ONLY EXPERIMENT
-==========================================
-Changes from v9:
-  1. LONG_ONLY = True — shorts disabled entirely
-       Longs: 84.6% WR, +1.393% avg  (v9)
-       Shorts: 78.0% WR, +0.538% avg (v9) — not worth the drag
-  2. Output changed to CSV (no xlsxwriter/openpyxl dependency)
-  3. MIN_COOLDOWN_CANDLES raised 3 → 4 to further reduce churn
-       on long-only mode (less signal pressure without shorts)
+BACKTEST v11.0 — RAISE THRESHOLD + TRIM WEAK INDICATORS
+=========================================================
+Changes from v10:
+  1. MIN_SCORE_PCT raised 0.43 → 0.45
+       v10 score band breakdown was a perfect quality ladder:
+         40-45%: 79.3% WR (111 trades) ← cutting this band
+         45-50%: 83.7% WR
+         50-55%: 88.5% WR
+         55-60%: 94.1% WR
+       Target: ~86-87% WR on ~216 signals
 
-Hypothesis: removing shorts should raise overall WR above 84%,
-reduce MDD, and improve avg PnL/trade significantly.
+  2. Indicator weight reductions:
+       bull_engulf:   1.5 → 0.5  (76.8% WR in v10 — below baseline)
+       stoch_rsi_bull: 2  → 1    (78.6% WR in v10 — weak contributor)
+       4h_rsi_bull kept as-is    (n=13, too small to conclude)
 
-Run:    python backtest_v10.py
-Output: backtest_v10_results.csv + backtest_v10_summary.txt
+Run:    python backtest_v11.py
+Output: backtest_v11_trades.csv + backtest_v11_summary.txt
 """
 
 import asyncio
@@ -37,17 +40,17 @@ MIN_VOLUME_USDT = 3_000_000
 
 ATR_SL_MULT       = 1.2
 ATR_TP1_ONLY      = 0.8
-MIN_SCORE_PCT     = 0.43   # long threshold
-MIN_SCORE_SHORT   = 0.48   # unused in LONG_ONLY mode, kept for reference
-MIN_COOLDOWN_CANDLES = 4   # raised from 3 — fewer signals, more spacing
+MIN_SCORE_PCT     = 0.45   # raised from 0.43 — cuts weak 40-45% band (79.3% WR)
+MIN_SCORE_SHORT   = 0.48   # unused in LONG_ONLY mode
+MIN_COOLDOWN_CANDLES = 4
 QUALITY_PREMIUM   = 0.60
 REGIME_MODE       = 'HARD'
-LONG_ONLY         = True   # NEW: disable shorts entirely
+LONG_ONLY         = True
 LONG_FILTER       = True
 MAX_TRADE_HOURS   = 24
 
-OUTPUT_CSV     = '/mnt/user-data/outputs/backtest_v10_trades.csv'
-OUTPUT_SUMMARY = '/mnt/user-data/outputs/backtest_v10_summary.txt'
+OUTPUT_CSV     = '/mnt/user-data/outputs/backtest_v11_trades.csv'
+OUTPUT_SUMMARY = '/mnt/user-data/outputs/backtest_v11_summary.txt'
 
 # ── Anchor indicators — at least one must be present per trade ──
 LONG_ANCHORS  = {
@@ -191,9 +194,10 @@ def score_candle(r1h, p1h, r4h, r15m, vol_ratio):
     if rsi > 60:    ss += 2;   sr['rsi_sell_zone'] = 2
 
     # stoch_rsi_bear removed (69.0% WR) — only keeping bull side
+    # stoch_rsi_bull weight reduced 2 → 1 (78.6% WR in v10 — weak contributor)
     sk = r1h['stoch_rsi_k']; sd = r1h['stoch_rsi_d']
     if sk < 0.2 and sk > sd:
-        ls += 2; lr['stoch_rsi_bull'] = 2
+        ls += 1; lr['stoch_rsi_bull'] = 1
 
     # MACD — boosted weight (+1) as top performer 94.6%/91.3% WR
     if mcb:   ls += 4; lr['macd_cross_bull'] = 4
@@ -249,9 +253,9 @@ def score_candle(r1h, p1h, r4h, r15m, vol_ratio):
     if r1h['bull_div']:   ls += 2.5; lr['bull_div'] = 2.5
     elif r1h['bear_div']: ss += 2;   sr['bear_div'] = 2
 
-    # bull_engulf kept, bear_engulf removed (65.6% WR)
+    # bull_engulf weight reduced 1.5 → 0.5 (76.8% WR in v10 — below baseline)
     if r15m['bull_engulf']:
-        ls += 1.5; lr['bull_engulf'] = 1.5
+        ls += 0.5; lr['bull_engulf'] = 0.5
 
     # HTF
     if r4h['close'] > r4h['vwap']: ls += 1; lr['4h_above_vwap'] = 1
@@ -304,7 +308,7 @@ def simulate_trade(idx, df_1h, direction, entry, sl, tp):
 # BACKTESTER
 # ─────────────────────────────────────────────────────────────
 
-class BacktesterV10:
+class BacktesterV11:
     def __init__(self):
         self.exchange = ccxt.binance({
             'enableRateLimit': True,
@@ -405,7 +409,7 @@ class BacktesterV10:
             max_score_long  = 40.0
             max_score_short = 29.5
 
-            thresh_long  = max_score_long  * MIN_SCORE_PCT    # 0.43
+            thresh_long  = max_score_long  * MIN_SCORE_PCT    # 0.45
             thresh_short = max_score_short * MIN_SCORE_SHORT   # 0.48 — tighter
 
             signal = None
@@ -559,7 +563,7 @@ class BacktesterV10:
         good   = df[df['quality']=='GOOD']
 
         print("\n" + "╔"+"═"*54+"╗")
-        print("║" + "  📊 BACKTEST v10 — FINAL RESULTS".center(54) + "║")
+        print("║" + "  📊 BACKTEST v11 — FINAL RESULTS".center(54) + "║")
         print("╚"+"═"*54+"╝")
         print(f"\n  Settings: score≥{MIN_SCORE_PCT*100:.0f}% | {REGIME_MODE} regime | TP1={ATR_TP1_ONLY}x | SL={ATR_SL_MULT}x")
         print(f"  Pairs: {df['symbol'].nunique()} | Lookback: {LOOKBACK_DAYS}d\n")
@@ -681,7 +685,7 @@ class BacktesterV10:
 
         lines = [
             "╔══════════════════════════════════════════════════════╗",
-            "║         BACKTEST v10 — SUMMARY                      ║",
+            "║         BACKTEST v11 — SUMMARY                      ║",
             "╚══════════════════════════════════════════════════════╝",
             f"  LONG_ONLY        = {LONG_ONLY}",
             f"  MIN_SCORE_PCT    = {MIN_SCORE_PCT}",
@@ -741,7 +745,7 @@ class BacktesterV10:
     async def run(self):
         print(f"""
 ╔══════════════════════════════════════════════════════╗
-║         BACKTEST v10.0 — LONGS ONLY EXPERIMENT     ║
+║         BACKTEST v11.0 — RAISE THRESHOLD     ║
 ║  {LOOKBACK_DAYS}d | {TOP_N_PAIRS} pairs | L≥{MIN_SCORE_PCT*100:.0f}% ONLY | {REGIME_MODE} | TP={ATR_TP1_ONLY}x SL={ATR_SL_MULT}x | cd≥{MIN_COOLDOWN_CANDLES}
 ╚══════════════════════════════════════════════════════╝
 
@@ -770,7 +774,7 @@ class BacktesterV10:
 
 
 async def main():
-    bt = BacktesterV10()
+    bt = BacktesterV11()
     await bt.run()
 
 if __name__ == '__main__':
