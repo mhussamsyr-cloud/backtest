@@ -1,17 +1,19 @@
 """
-BACKTEST v9.0 — COOLDOWN + SHORT FILTER
+BACKTEST v10.0 — LONGS ONLY EXPERIMENT
 ==========================================
-Changes from v8:
-  1. MIN_COOLDOWN_CANDLES = 3 — per-pair minimum cooldown
-       regardless of trade duration, kills churn from fast SL exits
-  2. MIN_SCORE_SHORT = 0.48 — shorts need higher threshold
-       (shorts: 78.3% WR vs longs: 84.8% WR in v8, needed filtering)
-  3. Removed upper_bb (52.9% WR — coin flip) and
-       rsi_neutral_bear (50.0% WR — literally random)
-  4. Fixed Excel engine: xlsxwriter → openpyxl
+Changes from v9:
+  1. LONG_ONLY = True — shorts disabled entirely
+       Longs: 84.6% WR, +1.393% avg  (v9)
+       Shorts: 78.0% WR, +0.538% avg (v9) — not worth the drag
+  2. Output changed to CSV (no xlsxwriter/openpyxl dependency)
+  3. MIN_COOLDOWN_CANDLES raised 3 → 4 to further reduce churn
+       on long-only mode (less signal pressure without shorts)
 
-Run:    python backtest_v9.py
-Output: backtest_v9_results.xlsx
+Hypothesis: removing shorts should raise overall WR above 84%,
+reduce MDD, and improve avg PnL/trade significantly.
+
+Run:    python backtest_v10.py
+Output: backtest_v10_results.csv + backtest_v10_summary.txt
 """
 
 import asyncio
@@ -36,14 +38,16 @@ MIN_VOLUME_USDT = 3_000_000
 ATR_SL_MULT       = 1.2
 ATR_TP1_ONLY      = 0.8
 MIN_SCORE_PCT     = 0.43   # long threshold
-MIN_SCORE_SHORT   = 0.48   # NEW: shorts need higher bar (78.3% WR vs 84.8% longs in v8)
-MIN_COOLDOWN_CANDLES = 3   # NEW: minimum candles between same-direction trades per pair
+MIN_SCORE_SHORT   = 0.48   # unused in LONG_ONLY mode, kept for reference
+MIN_COOLDOWN_CANDLES = 4   # raised from 3 — fewer signals, more spacing
 QUALITY_PREMIUM   = 0.60
 REGIME_MODE       = 'HARD'
+LONG_ONLY         = True   # NEW: disable shorts entirely
 LONG_FILTER       = True
 MAX_TRADE_HOURS   = 24
 
-OUTPUT_FILE = '/mnt/user-data/outputs/backtest_v9_results.xlsx'
+OUTPUT_CSV     = '/mnt/user-data/outputs/backtest_v10_trades.csv'
+OUTPUT_SUMMARY = '/mnt/user-data/outputs/backtest_v10_summary.txt'
 
 # ── Anchor indicators — at least one must be present per trade ──
 LONG_ANCHORS  = {
@@ -300,7 +304,7 @@ def simulate_trade(idx, df_1h, direction, entry, sl, tp):
 # BACKTESTER
 # ─────────────────────────────────────────────────────────────
 
-class BacktesterV9:
+class BacktesterV10:
     def __init__(self):
         self.exchange = ccxt.binance({
             'enableRateLimit': True,
@@ -407,7 +411,7 @@ class BacktesterV9:
             signal = None
             if ls > ss and ls >= thresh_long:
                 signal = 'LONG';  score = ls; max_score = max_score_long;  reasons = lr
-            elif ss > ls and ss >= thresh_short:
+            elif ss > ls and ss >= thresh_short and not LONG_ONLY:
                 signal = 'SHORT'; score = ss; max_score = max_score_short; reasons = sr
             if not signal:
                 continue
@@ -555,7 +559,7 @@ class BacktesterV9:
         good   = df[df['quality']=='GOOD']
 
         print("\n" + "╔"+"═"*54+"╗")
-        print("║" + "  📊 BACKTEST v9 — FINAL RESULTS".center(54) + "║")
+        print("║" + "  📊 BACKTEST v10 — FINAL RESULTS".center(54) + "║")
         print("╚"+"═"*54+"╝")
         print(f"\n  Settings: score≥{MIN_SCORE_PCT*100:.0f}% | {REGIME_MODE} regime | TP1={ATR_TP1_ONLY}x | SL={ATR_SL_MULT}x")
         print(f"  Pairs: {df['symbol'].nunique()} | Lookback: {LOOKBACK_DAYS}d\n")
@@ -657,121 +661,94 @@ class BacktesterV9:
         print(f"  Monitor via /stats after 2 weeks")
         print(f"  If live WR < {wr-8:.0f}% → raise MIN_SCORE_PCT to 0.45 / MIN_SCORE_SHORT to 0.50")
 
-        self._save_excel(df, ind_df, sym_df, spd, spm, wr, pf, apnl, aw,
-                         al, al_sl, al_timeout, mr, mdd, slr, tor)
+        self._save_csv(df, ind_df, sym_df, spd, spm, wr, pf, apnl, aw,
+                       al, al_sl, al_timeout, mr, mdd, slr, tor)
 
-    def _save_excel(self, df, ind_df, sym_df, spd, spm, wr, pf, apnl, aw,
-                    al, al_sl, al_timeout, mr, mdd, slr, tor):
-        print(f"\n💾 Saving {OUTPUT_FILE}...")
+    def _save_csv(self, df, ind_df, sym_df, spd, spm, wr, pf, apnl, aw,
+                  al, al_sl, al_timeout, mr, mdd, slr, tor):
+        import os, csv
         os.makedirs('/mnt/user-data/outputs', exist_ok=True)
 
+        # ── All trades CSV ──
+        df_export = df.drop(columns=['reasons'], errors='ignore')
+        df_export.to_csv(OUTPUT_CSV, index=False)
+        print(f"✅ Trades saved → {OUTPUT_CSV}")
+
+        # ── Summary text ──
         longs  = df[df['direction']=='LONG']
-        shorts = df[df['direction']=='SHORT']
         prem   = df[df['quality']=='PREMIUM']
         good   = df[df['quality']=='GOOD']
 
-        summary = pd.DataFrame({'Metric': [
-            '─── PERFORMANCE ───',
-            'Pairs Tested', 'Total Signals', 'Signals/Day', 'Signals/Month',
-            'Win Rate %', 'Profit Factor (vs SL)', 'Avg PnL %',
-            'Avg Win %', 'Avg SL Loss %', 'Avg Timeout PnL %', 'Avg All-Loss %',
-            'Monthly Return Est %', 'Max Drawdown %',
-            'TP1 Rate %', 'SL Rate %', 'Timeout Rate %', 'Avg Duration (h)',
-            '─── BY DIRECTION ───',
-            'Long Signals', 'Long WR %', 'Long Avg PnL %',
-            'Short Signals', 'Short WR %', 'Short Avg PnL %',
-            '─── BY QUALITY ───',
-            'PREMIUM Signals', 'PREMIUM WR %',
-            'GOOD Signals', 'GOOD WR %',
-            '─── FILTERS ───',
-            'Regime Blocked', 'Long Filtered', 'Anchor Rejected',
-            '─── SETTINGS ───',
-            'MIN_SCORE_PCT', 'REGIME_MODE', 'ATR_TP1', 'ATR_SL',
-            'LONG_FILTER', 'ANCHOR_FILTER', 'Pairs Universe', 'Lookback Days',
-        ], 'Value': [
-            '',
-            df['symbol'].nunique(), len(df), round(spd,1), round(spm,0),
-            round(wr,1), round(pf,2), round(apnl,3),
-            round(aw,3), round(al_sl,3), round(al_timeout,3), round(al,3),
-            round(mr,1), round(mdd,2),
-            round(wr,1), round(slr,1), round(tor,1), round(df['duration_h'].mean(),1),
-            '',
-            len(longs), round(longs['win'].mean()*100,1) if len(longs)>0 else 0,
-            round(longs['pnl_pct'].mean(),3) if len(longs)>0 else 0,
-            len(shorts), round(shorts['win'].mean()*100,1) if len(shorts)>0 else 0,
-            round(shorts['pnl_pct'].mean(),3) if len(shorts)>0 else 0,
-            '',
-            len(prem), round(prem['win'].mean()*100,1) if len(prem)>0 else 0,
-            len(good), round(good['win'].mean()*100,1) if len(good)>0 else 0,
-            '',
-            self.regime_blocked, self.filtered_long, self.anchor_rejected,
-            '',
-            MIN_SCORE_PCT, REGIME_MODE, ATR_TP1_ONLY, ATR_SL_MULT,
-            LONG_FILTER, True, TOP_N_PAIRS, LOOKBACK_DAYS,
-        ]})
-
-        band_rows = []
+        lines = [
+            "╔══════════════════════════════════════════════════════╗",
+            "║         BACKTEST v10 — SUMMARY                      ║",
+            "╚══════════════════════════════════════════════════════╝",
+            f"  LONG_ONLY        = {LONG_ONLY}",
+            f"  MIN_SCORE_PCT    = {MIN_SCORE_PCT}",
+            f"  ATR_TP1_ONLY     = {ATR_TP1_ONLY}",
+            f"  ATR_SL_MULT      = {ATR_SL_MULT}",
+            f"  MIN_COOLDOWN     = {MIN_COOLDOWN_CANDLES}",
+            f"  REGIME_MODE      = {REGIME_MODE}",
+            "",
+            f"  Pairs tested     : {df['symbol'].nunique()}",
+            f"  Signals          : {len(df)}  ({spd:.1f}/day | {spm:.0f}/month)",
+            f"  Win Rate         : {wr:.1f}%",
+            f"  Profit Factor    : {pf:.2f}",
+            f"  Avg PnL/trade    : {apnl:+.3f}%",
+            f"  Avg Win          : {aw:+.3f}%",
+            f"  Avg SL Loss      : {al_sl:+.3f}%",
+            f"  Avg Timeout PnL  : {al_timeout:+.3f}%",
+            f"  Monthly est.     : {mr:+.1f}%",
+            f"  Max Drawdown     : {mdd:.2f}%",
+            f"  TP1 Rate         : {wr:.1f}%",
+            f"  SL Rate          : {slr:.1f}%",
+            f"  Avg Duration     : {df['duration_h'].mean():.1f}h",
+            f"  Regime blocked   : {self.regime_blocked}",
+            f"  Anchor rejected  : {self.anchor_rejected}",
+            "",
+            "  ── By Quality ──",
+            f"  PREMIUM  n={len(prem):4d} | WR={prem['win'].mean()*100:.1f}% | Avg={prem['pnl_pct'].mean():+.3f}%" if len(prem) > 0 else "  PREMIUM  n=0",
+            f"  GOOD     n={len(good):4d} | WR={good['win'].mean()*100:.1f}% | Avg={good['pnl_pct'].mean():+.3f}%" if len(good) > 0 else "  GOOD     n=0",
+            "",
+            "  ── Score Band Breakdown ──",
+            f"  {'Band':10s} {'n':>6} {'WR%':>7} {'Avg%':>8} {'SL%':>7}",
+        ]
         for lo, hi in [(40,45),(45,50),(50,55),(55,60),(60,65),(65,100)]:
             sub = df[(df['score_pct']>=lo) & (df['score_pct']<hi)]
             if len(sub) < 3: continue
-            band_rows.append({
-                'Band': f'{lo}-{hi}%',
-                'Signals': len(sub),
-                'Win Rate %': round(sub['win'].mean()*100,1),
-                'Avg PnL %': round(sub['pnl_pct'].mean(),3),
-                'SL Rate %': round((sub['outcome']=='SL').mean()*100,1),
-                'Avg Duration': round(sub['duration_h'].mean(),1),
-            })
+            lines.append(
+                f"  {lo}-{hi}%    {len(sub):>6d} "
+                f"{sub['win'].mean()*100:>6.1f}% "
+                f"{sub['pnl_pct'].mean():>+7.3f}% "
+                f"{(sub['outcome']=='SL').mean()*100:>6.1f}%"
+            )
+        lines += ["", "  ── Top Indicators ──"]
+        for _, r in ind_df.head(15).iterrows():
+            bar = '█' * int(r['win_rate']/5)
+            lines.append(f"  {r['indicator']:28s} {r['win_rate']:5.1f}%  n={r['triggered']:5d}  {bar}")
+        lines += ["", "  ── Bottom Indicators ──"]
+        for _, r in ind_df.tail(5).iterrows():
+            lines.append(f"  {r['indicator']:28s} {r['win_rate']:5.1f}%  n={r['triggered']:5d}")
+        lines += ["", "  ── Top 20 Symbols ──"]
+        lines.append(sym_df[sym_df['signals']>=3].head(20).to_string())
 
-        df_eq = df.sort_values('timestamp').copy().reset_index(drop=True)
-        df_eq['trade_num']       = range(1, len(df_eq)+1)
-        df_eq['cumulative_pnl']  = (1 + df_eq['pnl_pct']/100).cumprod()
-        df_eq['running_wr']      = df_eq['win'].expanding().mean() * 100
-        df_eq['running_avg_pnl'] = df_eq['pnl_pct'].expanding().mean()
-
-        df['month'] = pd.to_datetime(df['timestamp']).dt.to_period('M').astype(str)
-        monthly = df.groupby('month').agg(
-            signals  = ('win','count'),
-            win_rate = ('win', lambda x: round(x.mean()*100,1)),
-            avg_pnl  = ('pnl_pct', lambda x: round(x.mean(),3)),
-            total_pnl= ('pnl_pct', lambda x: round(x.sum(),2)),
-            sl_count = ('outcome', lambda x: (x=='SL').sum()),
-        ).reset_index()
-
-        df_export = df.drop(columns=['reasons'], errors='ignore')
-
-        with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl') as writer:
-            summary.to_excel(writer, sheet_name='📊 Summary', index=False)
-            pd.DataFrame(band_rows).to_excel(writer, sheet_name='📈 Score Bands', index=False)
-            monthly.to_excel(writer, sheet_name='📅 Monthly', index=False)
-            sym_df.reset_index().to_excel(writer, sheet_name='🏆 By Symbol', index=False)
-            ind_df.to_excel(writer, sheet_name='🔬 Indicators', index=False)
-            df_eq[['trade_num','symbol','direction','quality','score_pct',
-                   'btc_regime','outcome','pnl_pct','duration_h',
-                   'cumulative_pnl','running_wr','running_avg_pnl']
-            ].to_excel(writer, sheet_name='📉 Equity Curve', index=False)
-            df_export.to_excel(writer, sheet_name='📋 All Trades', index=False)
-
-            for sheet in writer.sheets.values():
-                sheet.set_column('A:Z', 20)
-                sheet.freeze_panes(1, 0)
-
-        print(f"✅ Saved | 7 sheets:")
-        print(f"   📊 Summary | 📈 Score Bands | 📅 Monthly")
-        print(f"   🏆 By Symbol | 🔬 Indicators | 📉 Equity Curve | 📋 All Trades")
+        summary_text = "\n".join(lines)
+        with open(OUTPUT_SUMMARY, 'w') as f:
+            f.write(summary_text)
+        print(f"✅ Summary saved → {OUTPUT_SUMMARY}")
+        print(summary_text)
 
     async def run(self):
         print(f"""
 ╔══════════════════════════════════════════════════════╗
-║           BACKTEST v9.0 — COOLDOWN + SHORT FILTER   ║
-║  {LOOKBACK_DAYS}d | {TOP_N_PAIRS} pairs | L≥{MIN_SCORE_PCT*100:.0f}% S≥{MIN_SCORE_SHORT*100:.0f}% | {REGIME_MODE} | TP={ATR_TP1_ONLY}x SL={ATR_SL_MULT}x | cd≥{MIN_COOLDOWN_CANDLES}
+║         BACKTEST v10.0 — LONGS ONLY EXPERIMENT     ║
+║  {LOOKBACK_DAYS}d | {TOP_N_PAIRS} pairs | L≥{MIN_SCORE_PCT*100:.0f}% ONLY | {REGIME_MODE} | TP={ATR_TP1_ONLY}x SL={ATR_SL_MULT}x | cd≥{MIN_COOLDOWN_CANDLES}
 ╚══════════════════════════════════════════════════════╝
 
-  Changes vs v8:
-  • Cooldown: max(trade_duration, {MIN_COOLDOWN_CANDLES}) candles min — kills fast-SL churn
-  • Shorts:   threshold raised 0.43 → 0.48 (longs stay 0.43)
-  • Removed:  upper_bb (52.9% WR), rsi_neutral_bear (50.0% WR)
-  • Fixed:    Excel engine openpyxl
+  Changes vs v9:
+  • LONG_ONLY = True — shorts fully disabled
+  • MIN_COOLDOWN_CANDLES raised 3 → 4
+  • Output: CSV (no Excel dependency)
 """)
         pairs      = await self.get_pairs()
         btc_regime = await self.load_btc_regime()
@@ -793,7 +770,7 @@ class BacktesterV9:
 
 
 async def main():
-    bt = BacktesterV9()
+    bt = BacktesterV10()
     await bt.run()
 
 if __name__ == '__main__':
