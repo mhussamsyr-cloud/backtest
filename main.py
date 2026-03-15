@@ -1,23 +1,19 @@
 """
-BACKTEST v10 — TIGHTER SL (15M ATR) + DEDUP TEST
-==================================================
-Tests the v8 live bot changes:
+BACKTEST v11 — FINAL (15M ATR SL, FULL 600-PAIR UNIVERSE)
+==========================================================
+v10 proved the 15M ATR SL concept works:
+  v10: PF=23.39 | WR=81.3% | +1.317%/trade | DD=-7.3%
+  Problem: only 12 signals/month (500k→3M volume cut pairs)
 
-  SL  = 1.5x 15M ATR  ← was 1.5x 1H ATR (3-4x tighter)
-  TP  = 0.6x 1H ATR   ← unchanged
-  RR  = naturally ~1.5-2:1 instead of ~0.4:1
+v11 fix: restore MIN_VOLUME = 500k → get back to ~60-80/month
+  SL  = 1.5x 15M ATR  (proven better than 1H ATR)
+  TP  = 0.6x 1H ATR   (unchanged)
+  MIN_VOLUME = 500k   (restored — more pairs = more signals)
 
-Everything else identical to locked v6/v7:
-  MIN_SCORE_PCT = 0.43
-  REGIME_MODE   = HARD
-  LONG_FILTER   = True
-  MIN_VOLUME    = 3M (raised from 500k)
+Target: 60-80 signals/month at 78%+ WR, PF>10, DD<-12%
 
-Question: does tighter SL hurt WR, and does the
-improved RR make it net better EV per trade?
-
-Run:    python backtest_v10_tighter_sl.py
-Output: backtest_v10_tighter_sl_results.xlsx
+Run:    python backtest_v11_final.py
+Output: backtest_v11_final_results.xlsx
 """
 
 import asyncio
@@ -37,7 +33,7 @@ warnings.filterwarnings('ignore')
 # ─────────────────────────────────────────────────────────────
 LOOKBACK_DAYS   = 720
 TOP_N_PAIRS     = 600
-MIN_VOLUME_USDT = 3_000_000  # raised — quality pairs only (matches v8 live bot)
+MIN_VOLUME_USDT = 500_000    # RESTORED — full universe for signal volume
 
 ATR_SL_MULT       = 1.5
 ATR_TP1_ONLY      = 0.6
@@ -47,7 +43,7 @@ REGIME_MODE       = 'HARD'    # HARD / SOFT / OFF
 LONG_FILTER       = True
 MAX_TRADE_HOURS   = 24
 
-OUTPUT_FILE = '/mnt/user-data/outputs/backtest_v10_tighter_sl_results.xlsx'
+OUTPUT_FILE = '/mnt/user-data/outputs/backtest_v11_final_results.xlsx'
 
 # ─────────────────────────────────────────────────────────────
 # INDICATORS
@@ -270,7 +266,7 @@ def simulate_trade(idx, df_1h, direction, entry, sl, tp):
 # BACKTESTER
 # ─────────────────────────────────────────────────────────────
 
-class BacktesterV10:
+class BacktesterV11:
     def __init__(self):
         self.exchange = ccxt.binance({
             'enableRateLimit': True,
@@ -501,7 +497,7 @@ class BacktesterV10:
 
         # ── Console ──────────────────────────────────────────
         print("\n" + "╔"+"═"*54+"╗")
-        print("║" + "  📊 BACKTEST v10 — TIGHTER SL RESULTS".center(54) + "║")
+        print("║" + "  📊 BACKTEST v11 — FINAL RESULTS".center(54) + "║")
         print("╚"+"═"*54+"╝")
         print(f"\n  Settings: score≥{MIN_SCORE_PCT*100:.0f}% | {REGIME_MODE} regime | TP1={ATR_TP1_ONLY}x | SL={ATR_SL_MULT}x")
         print(f"  Pairs: {df['symbol'].nunique()} | Lookback: {LOOKBACK_DAYS}d\n")
@@ -730,7 +726,7 @@ class BacktesterV10:
 
 
 async def main():
-    bt = BacktesterV10()
+    bt = BacktesterV11()
     await bt.run()
 
 if __name__ == '__main__':
