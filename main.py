@@ -64,7 +64,7 @@ MIN_SCORE_PCT       = 0.43           # 600-pair backtest: 3.7/day at 85.2% WR
 QUALITY_PREMIUM_PCT = 0.60           # 60%+ score = PREMIUM (adjusted for lower score range)
 
 SCAN_INTERVAL_MIN = 15
-MIN_VOLUME_USDT   = 3_000_000        # raised: quality pairs only
+MIN_VOLUME_USDT   = 5_000_000        # raised: quality pairs only
 MAX_TRADE_HOURS   = 24
 
 # ═══════════════════════════════════════════════════
