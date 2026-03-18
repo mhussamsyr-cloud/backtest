@@ -64,7 +64,7 @@ LONG_TP3_PCT  = 0.34
 SHORT_TP1_PCT = 0.70
 SHORT_TP2_PCT = 0.30
 
-MIN_SCORE_PCT       = 0.55    # FIX 1: was 0.47 — kills weak 50-54% band
+MIN_SCORE_PCT       = 0.50    # FIX 1: was 0.47 — kills weak 50-54% band
 QUALITY_PREMIUM_PCT = 0.70    # recalibrated for new floor
 
 SCAN_INTERVAL_MIN = 15
